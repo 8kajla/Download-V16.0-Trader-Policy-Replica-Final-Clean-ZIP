@@ -245,6 +245,7 @@ def main():
 
             resolve_pending(now)
             books = {}
+            market_list = list(markets.values())
 
             # One global policy decision at each trader-paced cadence tick.
             # First collect ALL eligible candidates across all markets. The
