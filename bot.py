@@ -218,7 +218,7 @@ def main():
     global last_disc, last_maintenance, consecutive_errors, next_trade_at, scan_offset, current_target_band
 
     startup_data_check()
-    p("BOT B | PAPER ONLY | V16.0 TRADER POLICY REPLICA 40PCT")
+    p("BOT B | PAPER ONLY | V16.1 TRADER POLICY REPLICA 40PCT")
 
     while True:
         try:
@@ -245,7 +245,6 @@ def main():
 
             resolve_pending(now)
             books = {}
-            market_list = list(markets.values())
 
             # One global policy decision at each trader-paced cadence tick.
             # First collect ALL eligible candidates across all markets. The
