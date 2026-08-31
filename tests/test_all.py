@@ -57,7 +57,7 @@ def test_resolution_accounting_and_research():
 
 def test_v16_scheduler_targets_are_loaded_from_trader_data():
     s = S()
-    assert s.VERSION == "V16.0_TRADER_POLICY_REPLICA_40PCT"
+    assert s.VERSION == "V16.1_TRADER_POLICY_REPLICA_40PCT"
     assert s.scheduler.trade_targets["C00_05"] == pytest.approx(0.11041669879555234)
     assert s.scheduler.capital_targets["H95_100"] == pytest.approx(0.452749963176931)
 
@@ -159,3 +159,29 @@ def test_v16_invalid_zero_ask_is_rejected():
     s=S()
     assert s._candidate('BTC','Up',.96,0.0,100,H(.96),1000,None,0,0) is None
     assert s._candidate('BTC','Up',.96,.95,100,H(.96),1000,None,0,0) is None
+
+
+def test_v16_m50_cumulative_quota_cannot_dominate():
+    s = S()
+    # Reproduce the observed failure: M50-60 has already captured ~90% of
+    # the stream. The scheduler must refuse another M50-60 trade even when it
+    # is the only candidate.
+    for _ in range(20):
+        s.observe_trade_distribution("M50_60", 0.9)
+    assert s.choose_distribution_band([{"band": "M50_60", "target": 0.9}]) is None
+
+
+def test_v16_quota_prefers_underrepresented_available_band():
+    s = S()
+    for _ in range(20):
+        s.observe_trade_distribution("M50_60", 0.9)
+    # C20-30 is still under its quota, so it should be selected over M50-60.
+    band = s.choose_distribution_band([
+        {"band": "M50_60", "target": 0.9},
+        {"band": "C20_30", "target": 0.4},
+    ])
+    assert band == "C20_30"
+
+
+def test_v161_bot_banner_and_strategy_version():
+    assert 'V16.1 TRADER POLICY REPLICA 40PCT' in Path(__file__).resolve().parents[1].joinpath('bot.py').read_text()
