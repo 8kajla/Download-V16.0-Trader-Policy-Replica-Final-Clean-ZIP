@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-import json, time, random
+import json, time, random, math
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -144,16 +144,33 @@ class TraderPolicyScheduler:
             ) / total_capital if total_capital > 0 else 0.0
         return trades, capital
 
+    def projected_state(self, band, notional):
+        return self._shares_after(band, notional)
+
+    def band_is_within_trade_quota(self, band):
+        """Hard cumulative quota: a band cannot run ahead of its trader share.
+
+        For N observed trades, the next accepted trade in a band is allowed
+        only when the resulting count is <= ceil((N+1)*target). This prevents
+        one continuously available band (the M50-60 failure seen in V16) from
+        consuming the stream simply because it happens to be liquid.
+        """
+        total = sum(self.trade_counts.values())
+        target = self.trade_targets.get(band, 0.0)
+        allowed = int(math.ceil((total + 1) * target))
+        return self.trade_counts.get(band, 0) + 1 <= max(1, allowed)
+
     def projected_score(self, band, notional):
-        trades, capital = self._shares_after(band, notional)
-        # Absolute normalized errors keep every fine band visible, while the
-        # calibrated entry sizing makes the capital objective compatible with
-        # the trader's trade-count distribution.
+        trades, capital = self.projected_state(band, notional)
         score = 0.0
         for b in self.bands:
-            t_err = abs(trades[b] - self.trade_targets[b]) / max(self.trade_targets[b], 1e-9)
-            c_err = abs(capital[b] - self.capital_targets[b]) / max(self.capital_targets[b], 1e-9)
-            score += t_err + c_err
+            # Positive values mean the band is still under target; negative
+            # values mean it is already over target. Weight trade count more
+            # heavily because count is the exact observable quota we can
+            # enforce without inventing execution availability.
+            t_gap = (self.trade_targets[b] - trades[b]) / max(self.trade_targets[b], 1e-9)
+            c_gap = (self.capital_targets[b] - capital[b]) / max(self.capital_targets[b], 1e-9)
+            score += 2.0 * t_gap + c_gap
         return score
 
     def choose_band(self, candidates):
@@ -162,12 +179,33 @@ class TraderPolicyScheduler:
         by_band = {}
         for c in candidates:
             by_band.setdefault(c["band"], []).append(c)
+
+        # First enforce the trader's exact cumulative count quota. No fallback
+        # is allowed when the only available band is already ahead of quota.
+        quota_eligible = {
+            band: rows for band, rows in by_band.items()
+            if self.band_is_within_trade_quota(band)
+        }
+        if not quota_eligible:
+            return None
+
         scored = []
-        for band, rows in by_band.items():
-            # Candidate with smallest projected error represents the cheapest
-            # opportunity for that band without changing price/entry sizing.
-            min_error = min(self.projected_score(band, c["target"]) for c in rows)
-            scored.append((min_error, -self.trade_targets[band], band))
+        for band, rows in quota_eligible.items():
+            min_error = min(
+                self.projected_score(band, float(c["target"]))
+                for c in rows
+            )
+            # Prefer the most under-target trade share; use projected capital
+            # error as the secondary objective.
+            best_row = min(
+                rows,
+                key=lambda c: self.projected_score(band, float(c["target"]))
+            )
+            trades, capital = self.projected_state(band, float(best_row["target"]))
+            t_deficit = (self.trade_targets[band] - trades[band]) / max(self.trade_targets[band], 1e-9)
+            c_deficit = (self.capital_targets[band] - capital[band]) / max(self.capital_targets[band], 1e-9)
+            scored.append((-2.0 * t_deficit - c_deficit, min_error, band))
+
         scored.sort()
         return scored[0][2]
 
@@ -199,7 +237,7 @@ class TraderPolicyScheduler:
 
 
 class CapitalFirstStrategy:
-    VERSION = "V16.0_TRADER_POLICY_REPLICA_40PCT"
+    VERSION = "V16.1_TRADER_POLICY_REPLICA_40PCT"
     DATA_FILE = Path(__file__).with_name("trader_behavior.json")
     BANDS = BANDS
     HARD_CUTOFF = 60.0
